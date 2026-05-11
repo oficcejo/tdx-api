@@ -41,6 +41,11 @@ func Uint16(bs []byte) uint16 {
 	return conv.Uint16(Reverse(bs))
 }
 
+// Int16 字节通过小端方式转为int16
+func Int16(bs []byte) int16 {
+	return conv.Int16(Reverse(bs))
+}
+
 func UTF8ToGBK(text []byte) []byte {
 	r := bytes.NewReader(text)
 	decoder := transform.NewReader(r, simplifiedchinese.GBK.NewDecoder()) //GB18030

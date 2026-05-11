@@ -39,8 +39,8 @@ type Quote struct {
 	ReversedBytes6 int     // 保留，未知
 	ReversedBytes7 int     // 保留，未知
 	ReversedBytes8 int     // 保留，未知
-	ReversedBytes9 uint16  // 保留，未知
-	Rate           float64 // 涨速，好像都是0
+	ReversedBytes9 int16   // 保留，未知（涨速原始值，有符号）
+	Rate           float64 // 涨速
 	Active2        uint16  // 活跃度
 }
 
@@ -158,7 +158,7 @@ func (this quote) Decode(bs []byte) QuotesResp {
 		bs, sec.ReversedBytes6 = CutInt(bs)
 		bs, sec.ReversedBytes7 = CutInt(bs)
 		bs, sec.ReversedBytes8 = CutInt(bs)
-		sec.ReversedBytes9 = Uint16(bs[:2])
+		sec.ReversedBytes9 = Int16(bs[:2])
 
 		sec.Rate = float64(sec.ReversedBytes9) / 100
 		sec.Active2 = Uint16(bs[2:4])
