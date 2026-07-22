@@ -125,13 +125,18 @@ func GetTHSDayKline(code string, _type uint8) ([]*Kline, error) {
 	}
 
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("同花顺日K线HTTP状态异常: %s", resp.Status)
+	}
 	bs, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	n := bytes.IndexByte(bs, '(')
-	bs = bs[n+1 : len(bs)-1]
+	bs, err = parseTHSJSONPBody(bs)
+	if err != nil {
+		return nil, err
+	}
 
 	m := map[string]any{}
 	err = json.Unmarshal(bs, &m)
@@ -195,4 +200,21 @@ func GetTHSDayKline(code string, _type uint8) ([]*Kline, error) {
 	}
 
 	return ls, nil
+}
+
+func parseTHSJSONPBody(bs []byte) ([]byte, error) {
+	trimmed := bytes.TrimSpace(bs)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("同花顺日K线返回空响应")
+	}
+	open := bytes.IndexByte(trimmed, '(')
+	close := bytes.LastIndexByte(trimmed, ')')
+	if open < 0 || close <= open {
+		return nil, fmt.Errorf("同花顺日K线返回无效JSONP: bytes=%d", len(trimmed))
+	}
+	payload := bytes.TrimSpace(trimmed[open+1 : close])
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("同花顺日K线JSONP内容为空")
+	}
+	return payload, nil
 }
