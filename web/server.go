@@ -171,23 +171,54 @@ func handleGetKline(w http.ResponseWriter, r *http.Request) {
 
 // getQfqKlineDay 获取前复权日K线数据
 func getQfqKlineDay(code string) (*protocol.KlineResp, error) {
+	resp, _, err := getQfqKlineDayDetailed(code, time.Now())
+	return resp, err
+}
+
+type qfqKlineMetadata struct {
+	TailSource     string
+	TailVerifiedBy string
+	TailTradeDate  string
+}
+
+var qfqShanghaiLocation = time.FixedZone("Asia/Shanghai", 8*60*60)
+
+func getQfqKlineDayDetailed(code string, now time.Time) (*protocol.KlineResp, qfqKlineMetadata, error) {
 	// 使用同花顺API获取前复权数据
 	klines, err := extend.GetTHSDayKline(code, extend.THS_QFQ)
 	if err != nil {
-		return nil, fmt.Errorf("获取前复权数据失败: %w", err)
+		return nil, qfqKlineMetadata{}, fmt.Errorf("获取前复权数据失败: %w", err)
 	}
 
 	if len(klines) == 0 {
-		return nil, fmt.Errorf("同花顺前复权数据为空")
+		return nil, qfqKlineMetadata{}, fmt.Errorf("同花顺前复权数据为空")
 	}
 
-	// 从 TDX 获取原始 K 线补充成交额（THS 接口不返回 Amount）
+	// TDX 原始日线既提供成交量/成交额，也作为收盘尾部的严格裁判。
 	tdxResp, tdxErr := client.GetKlineDayAll(code)
-	amountMap := make(map[int64]protocol.Price)
-	if tdxErr == nil && tdxResp != nil {
-		for _, v := range tdxResp.List {
-			amountMap[v.Time.Unix()] = v.Amount
-		}
+	if tdxErr != nil {
+		return nil, qfqKlineMetadata{}, fmt.Errorf("获取 TDX 原始日线用于前复权尾部核验失败: %w", tdxErr)
+	}
+	if tdxResp == nil || len(tdxResp.List) == 0 {
+		return nil, qfqKlineMetadata{}, fmt.Errorf("TDX 原始日线为空，无法核验同花顺前复权尾部")
+	}
+
+	tail, err := extend.CompleteTHSQFQDailyTail(
+		klines,
+		tdxResp.List,
+		func() (*extend.Kline, error) {
+			return extend.GetTHSTodayKline(code, extend.THS_QFQ)
+		},
+		now,
+	)
+	if err != nil {
+		return nil, qfqKlineMetadata{}, fmt.Errorf("核验同花顺前复权收盘尾部失败: %w", err)
+	}
+	klines = tail.Klines
+
+	amountMap := make(map[string]protocol.Price)
+	for _, v := range tdxResp.List {
+		amountMap[v.Time.In(qfqShanghaiLocation).Format("2006-01-02")] = v.Amount
 	}
 
 	// 转换为 protocol.KlineResp 格式
@@ -207,8 +238,9 @@ func getQfqKlineDay(code string) (*protocol.KlineResp, error) {
 			Amount: k.Amount,
 		}
 		// 从 TDX 数据补充成交额
-		if pk.Amount == 0 && amountMap != nil {
-			if amt, ok := amountMap[k.Date]; ok {
+		if pk.Amount == 0 {
+			date := time.Unix(k.Date, 0).In(qfqShanghaiLocation).Format("2006-01-02")
+			if amt, ok := amountMap[date]; ok {
 				pk.Amount = amt
 			}
 		}
@@ -219,7 +251,11 @@ func getQfqKlineDay(code string) (*protocol.KlineResp, error) {
 		resp.List = append(resp.List, pk)
 	}
 
-	return resp, nil
+	return resp, qfqKlineMetadata{
+		TailSource:     tail.Source,
+		TailVerifiedBy: tail.VerifiedBy,
+		TailTradeDate:  tail.TradeDate,
+	}, nil
 }
 
 // convertToWeekKline 将日K线转换为周K线（简化版）

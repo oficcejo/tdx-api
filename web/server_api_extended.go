@@ -783,7 +783,7 @@ func handleGetKlineAllTHS(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := parsePositiveInt(r.URL.Query().Get("limit"))
 
-	list, err := fetchStockKlineAllTHS(code, klineType)
+	list, tailMeta, err := fetchStockKlineAllTHS(code, klineType)
 	if err != nil {
 		errorResponse(w, fmt.Sprintf("获取同花顺K线失败: %v", err))
 		return
@@ -793,7 +793,11 @@ func handleGetKlineAllTHS(w http.ResponseWriter, r *http.Request) {
 		list = list[len(list)-limit:]
 	}
 
-	respondKlineSuccess(w, "ths", klineType, list)
+	respondKlineSuccessWithMeta(w, "ths", klineType, list, map[string]interface{}{
+		"tail_source":      tailMeta.TailSource,
+		"tail_verified_by": tailMeta.TailVerifiedBy,
+		"tail_trade_date":  tailMeta.TailTradeDate,
+	})
 }
 
 // 获取交易日信息
@@ -1218,25 +1222,29 @@ func fetchStockKlineAllTDX(code, klineType string) ([]*protocol.Kline, error) {
 	}
 }
 
-func fetchStockKlineAllTHS(code, klineType string) ([]*protocol.Kline, error) {
-	resp, err := getQfqKlineDay(code)
+func fetchStockKlineAllTHS(code, klineType string) ([]*protocol.Kline, qfqKlineMetadata, error) {
+	resp, meta, err := getQfqKlineDayDetailed(code, time.Now())
 	if err != nil {
-		return nil, err
+		return nil, qfqKlineMetadata{}, err
 	}
 
 	switch strings.ToLower(klineType) {
 	case "", "day":
-		return resp.List, nil
+		return resp.List, meta, nil
 	case "week":
-		return convertToWeekKline(resp).List, nil
+		return convertToWeekKline(resp).List, meta, nil
 	case "month":
-		return convertToMonthKline(resp).List, nil
+		return convertToMonthKline(resp).List, meta, nil
 	default:
-		return nil, fmt.Errorf("同花顺接口暂仅支持 type=day/week/month")
+		return nil, qfqKlineMetadata{}, fmt.Errorf("同花顺接口暂仅支持 type=day/week/month")
 	}
 }
 
 func respondKlineSuccess(w http.ResponseWriter, source, klineType string, list []*protocol.Kline) {
+	respondKlineSuccessWithMeta(w, source, klineType, list, nil)
+}
+
+func respondKlineSuccessWithMeta(w http.ResponseWriter, source, klineType string, list []*protocol.Kline, extraMeta map[string]interface{}) {
 	kType := strings.ToLower(klineType)
 	meta := map[string]interface{}{
 		"source": source,
@@ -1258,6 +1266,11 @@ func respondKlineSuccess(w http.ResponseWriter, source, klineType string, list [
 		}
 	default:
 		meta["notes"] = []string{"未知数据源，请检查 source 参数"}
+	}
+	for key, value := range extraMeta {
+		if value != "" {
+			meta[key] = value
+		}
 	}
 
 	successResponse(w, map[string]interface{}{

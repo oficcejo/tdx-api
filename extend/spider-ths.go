@@ -8,17 +8,22 @@ import (
 	"github.com/injoyai/tdx"
 	"github.com/injoyai/tdx/protocol"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	UrlTHSDayKline       = "http://d.10jqka.com.cn/v6/line/hs_%s/0%d/all.js"
-	THS_BFQ        uint8 = 0 //不复权
-	THS_QFQ        uint8 = 1 //前复权
-	THS_HFQ        uint8 = 2 //后复权
+	UrlTHSDayKline         = "http://d.10jqka.com.cn/v6/line/hs_%s/0%d/all.js"
+	UrlTHSTodayKline       = "http://d.10jqka.com.cn/v6/line/hs_%s/0%d/today.js"
+	THS_BFQ          uint8 = 0 //不复权
+	THS_QFQ          uint8 = 1 //前复权
+	THS_HFQ          uint8 = 2 //后复权
 )
+
+var thsHTTPClient = &http.Client{Timeout: 8 * time.Second}
 
 // GetTHSDayKlineFactorFull 增加计算复权因子
 func GetTHSDayKlineFactorFull(code string, c *tdx.Client) ([3][]*Kline, []*THSFactor, error) {
@@ -106,34 +111,7 @@ func GetTHSDayKline(code string, _type uint8) ([]*Kline, error) {
 	}
 
 	u := fmt.Sprintf(UrlTHSDayKline, code[2:], _type)
-	req, err := http.NewRequest(http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	/*
-	 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
-	                      'Chrome/90.0.4430.212 Safari/537.36',
-	        'Referer': 'http://stockpage.10jqka.com.cn/',
-	        'DNT': '1',
-	*/
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.90 Safari/537.36 Edg/89.0.774.54")
-	req.Header.Set("Referer", "http://stockpage.10jqka.com.cn/")
-	req.Header.Set("DNT", "1")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("同花顺日K线HTTP状态异常: %s", resp.Status)
-	}
-	bs, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	bs, err = parseTHSJSONPBody(bs)
+	bs, err := fetchTHSJSONP(u)
 	if err != nil {
 		return nil, err
 	}
@@ -177,22 +155,22 @@ func GetTHSDayKline(code string, _type uint8) ([]*Kline, error) {
 
 	ls := []*Kline(nil)
 	i := 0
-	nowYear := time.Now().Year()
+	nowYear := time.Now().In(shanghaiLocation).Year()
 	for year := 1990; year <= nowYear; year++ {
 		for _, d := range mYear[year] {
 			x, err := time.Parse("0102", d)
 			if err != nil {
 				return nil, err
 			}
-			x = time.Date(year, x.Month(), x.Day(), 15, 0, 0, 0, time.Local)
-			low := protocol.Price(conv.Float64(prices[i*4+0]) * 1000 / priceFactor)
+			x = time.Date(year, x.Month(), x.Day(), 15, 0, 0, 0, shanghaiLocation)
+			low := protocol.Price(math.Round(conv.Float64(prices[i*4+0]) * 1000 / priceFactor))
 			ls = append(ls, &Kline{
 				Code:   protocol.AddPrefix(code),
 				Date:   x.Unix(),
-				Open:   protocol.Price(conv.Float64(prices[i*4+1])*1000/priceFactor) + low,
-				High:   protocol.Price(conv.Float64(prices[i*4+2])*1000/priceFactor) + low,
+				Open:   protocol.Price(math.Round(conv.Float64(prices[i*4+1])*1000/priceFactor)) + low,
+				High:   protocol.Price(math.Round(conv.Float64(prices[i*4+2])*1000/priceFactor)) + low,
 				Low:    low,
-				Close:  protocol.Price(conv.Float64(prices[i*4+3])*1000/priceFactor) + low,
+				Close:  protocol.Price(math.Round(conv.Float64(prices[i*4+3])*1000/priceFactor)) + low,
 				Volume: (conv.Int64(volumes[i]) + 50) / 100,
 			})
 			i++
@@ -200,6 +178,60 @@ func GetTHSDayKline(code string, _type uint8) ([]*Kline, error) {
 	}
 
 	return ls, nil
+}
+
+// GetTHSTodayKline obtains the current daily bar from the THS qfq route.
+func GetTHSTodayKline(code string, _type uint8) (*Kline, error) {
+	if _type != THS_BFQ && _type != THS_QFQ && _type != THS_HFQ {
+		return nil, fmt.Errorf("数据类型错误,例如:不复权0或前复权1或后复权2")
+	}
+
+	code = protocol.AddPrefix(code)
+	if len(code) != 8 {
+		return nil, fmt.Errorf("股票代码错误,例如:SZ000001或000001")
+	}
+
+	u := fmt.Sprintf(UrlTHSTodayKline, code[2:], _type)
+	bs, err := fetchTHSJSONP(u)
+	if err != nil {
+		return nil, err
+	}
+	return parseTHSTodayKline(bs, code)
+}
+
+func fetchTHSJSONP(url string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	/*
+	 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
+	                      'Chrome/90.0.4430.212 Safari/537.36',
+	        'Referer': 'http://stockpage.10jqka.com.cn/',
+	        'DNT': '1',
+	*/
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.90 Safari/537.36 Edg/89.0.774.54")
+	req.Header.Set("Referer", "http://stockpage.10jqka.com.cn/")
+	req.Header.Set("DNT", "1")
+	resp, err := thsHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("同花顺日K线HTTP状态异常: %s", resp.Status)
+	}
+	bs, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	bs, err = parseTHSJSONPBody(bs)
+	if err != nil {
+		return nil, err
+	}
+	return bs, nil
 }
 
 func parseTHSJSONPBody(bs []byte) ([]byte, error) {
@@ -217,4 +249,62 @@ func parseTHSJSONPBody(bs []byte) ([]byte, error) {
 		return nil, fmt.Errorf("同花顺日K线JSONP内容为空")
 	}
 	return payload, nil
+}
+
+func parseTHSTodayKline(bs []byte, code string) (*Kline, error) {
+	payload := map[string]map[string]any{}
+	if err := json.Unmarshal(bs, &payload); err != nil {
+		return nil, err
+	}
+	key := "hs_" + code[2:]
+	row, ok := payload[key]
+	if !ok {
+		return nil, fmt.Errorf("同花顺当日日K线缺少标的: %s", code)
+	}
+
+	dateText := conv.String(row["1"])
+	day, err := time.ParseInLocation("20060102", dateText, time.FixedZone("Asia/Shanghai", 8*60*60))
+	if err != nil {
+		return nil, fmt.Errorf("同花顺当日日K线日期无效: %q", dateText)
+	}
+	open, err := parseTHSMilliPrice(row["7"])
+	if err != nil {
+		return nil, fmt.Errorf("同花顺当日日K线开盘价无效: %w", err)
+	}
+	high, err := parseTHSMilliPrice(row["8"])
+	if err != nil {
+		return nil, fmt.Errorf("同花顺当日日K线最高价无效: %w", err)
+	}
+	low, err := parseTHSMilliPrice(row["9"])
+	if err != nil {
+		return nil, fmt.Errorf("同花顺当日日K线最低价无效: %w", err)
+	}
+	closePrice, err := parseTHSMilliPrice(row["11"])
+	if err != nil {
+		return nil, fmt.Errorf("同花顺当日日K线收盘价无效: %w", err)
+	}
+	if high < low || high < open || high < closePrice || low > open || low > closePrice {
+		return nil, fmt.Errorf("同花顺当日日K线OHLC关系无效")
+	}
+
+	return &Kline{
+		Code:  protocol.AddPrefix(code),
+		Date:  time.Date(day.Year(), day.Month(), day.Day(), 15, 0, 0, 0, day.Location()).Unix(),
+		Open:  open,
+		High:  high,
+		Low:   low,
+		Close: closePrice,
+	}, nil
+}
+
+func parseTHSMilliPrice(value any) (protocol.Price, error) {
+	text := strings.TrimSpace(conv.String(value))
+	if text == "" {
+		return 0, fmt.Errorf("价格为空")
+	}
+	parsed, err := strconv.ParseFloat(text, 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed <= 0 {
+		return 0, fmt.Errorf("价格=%q", text)
+	}
+	return protocol.Price(math.Round(parsed * 1000)), nil
 }
